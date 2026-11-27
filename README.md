@@ -28,6 +28,7 @@ The project provides:
 - [Protocol Support](#protocol-support)
 - [Requirements](#requirements)
 - [Setup](#setup)
+- [configuration](#configuration)
 - [limitations](#limitations)
 
 ---
@@ -301,7 +302,7 @@ or every other command that resets the sdkconfig. every thing you need is being 
 this module uses jd9365 lcd controller that many vendors manufacture it under the same name so you will need to use correct commands for this lcd. correct command set is included inside the project under the file name lcd_command.txt. you need to paste those commands in the C driver for the jd9365 that will be added to the project after fetching needed components in the path managed_components/espressif__esp_lcd_jd9365. the file name is esp_lcd_jd9365.c . you should copy and paste these commands inside this file under the tatic const jd9365_lcd_init_cmd_t vendor_specific_init_default[].(this array contains commands for the lcd you will need to replace them with commands inside lcd_command.txt file)
 
 
-Configure:
+## Configure:
 
 only configuration you might need is the SIP video call video encoding that you can do it in the menuconfig.
 
