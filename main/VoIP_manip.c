@@ -1,0 +1,307 @@
+/*
+ * ESPRESSIF MIT License
+ *
+ * Copyright (c) 2023 <ESPRESSIF SYSTEMS (SHANGHAI) CO., LTD>
+ *
+ * Permission is hereby granted for use on all ESPRESSIF SYSTEMS products, in which case,
+ * it is free of charge, to any person obtaining a copy of this software and associated
+ * documentation files (the "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the Software is furnished
+ * to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all copies or
+ * substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+ * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+ * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+ * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ *
+ */
+
+#include "VoIP_manip.h"
+#include "WIFI_manip.h"
+#include <stdatomic.h>
+#include <strings.h>
+#include "camera_manip.h"
+#include "sip_rtp_clock.h"
+#include "sip_audio_capture.h"
+#include "sip_video_tx.h"
+
+
+static const char *TAG = "SIP_SERVICE";
+static atomic_bool s_registered;
+static atomic_bool s_in_call;
+static atomic_bool s_incoming;
+static atomic_int s_last_event = ESP_RTC_EVENT_UNREGISTERED;
+static atomic_bool s_video_enabled;
+static atomic_bool s_video_active;
+static atomic_bool s_audio_active;
+static uint32_t s_video_sequence;
+static atomic_uint s_video_callbacks, s_video_frames, s_video_bytes;
+static atomic_uint s_video_busy, s_video_duplicate, s_video_oversize, s_video_failed;
+static atomic_bool s_video_headers_seen;
+static atomic_uint s_video_nal_mask;
+
+bool sip_service_has_video(void) { return atomic_load(&s_video_enabled); }
+bool sip_service_video_active(void) { return atomic_load(&s_video_active); }
+
+bool sip_service_registered(void) { return atomic_load(&s_registered); }
+bool sip_service_in_call(void) { return atomic_load(&s_in_call); }
+bool sip_service_incoming(void) { return atomic_load(&s_incoming); }
+esp_rtc_event_t sip_service_last_event(void) { return atomic_load(&s_last_event); }
+
+char *_get_network_ip(void)
+{
+    static char address[16];
+    return wifi_get_ip(address, sizeof(address)) ? address : NULL;
+}
+
+int _esp_sip_event_handler(esp_rtc_event_t event, void *ctx)
+{
+    atomic_store(&s_last_event, event);
+    switch (event) {
+        case ESP_RTC_EVENT_REGISTERED:
+            atomic_store(&s_registered, true);
+            break;
+        case ESP_RTC_EVENT_UNREGISTERED: atomic_store(&s_registered, false); break;
+        case ESP_RTC_EVENT_CALLING: atomic_store(&s_in_call, true); break;
+        case ESP_RTC_EVENT_INCOMING:
+            atomic_store(&s_incoming, true);
+            break;
+        case ESP_RTC_EVENT_CALL_ANSWERED:
+            atomic_store(&s_incoming, false);
+            atomic_store(&s_in_call, true);
+            break;
+        case ESP_RTC_EVENT_AUDIO_SESSION_BEGIN:
+            sip_rtp_clock_begin();
+            sip_audio_capture_start();
+            atomic_store(&s_audio_active, true);
+            atomic_store(&s_incoming, false);
+            atomic_store(&s_in_call, true);
+            break;
+        case ESP_RTC_EVENT_VIDEO_SESSION_BEGIN:
+            ESP_LOGI(TAG, "Video session began");
+            sip_video_tx_begin();
+            if (!atomic_load(&s_audio_active)) sip_rtp_clock_begin();
+            atomic_store(&s_video_headers_seen, false);
+            atomic_store(&s_video_nal_mask, 0);
+            atomic_store(&s_video_active, sip_service_has_video());
+            atomic_store(&s_incoming, false);
+            atomic_store(&s_in_call, true);
+            break;
+        case ESP_RTC_EVENT_AUDIO_SESSION_END:
+            sip_audio_capture_stop();
+            atomic_store(&s_audio_active, false);
+            atomic_store(&s_in_call, sip_service_video_active());
+            break;
+        case ESP_RTC_EVENT_VIDEO_SESSION_END:
+            ESP_LOGI(TAG, "Video session ended");
+            atomic_store(&s_video_active, false);
+            atomic_store(&s_in_call, atomic_load(&s_audio_active));
+            break;
+        case ESP_RTC_EVENT_ERROR:
+            atomic_store(&s_registered, false);
+            /* fall through */
+        case ESP_RTC_EVENT_HANGUP:
+            sip_audio_capture_stop();
+            sip_rtp_clock_reset();
+            atomic_store(&s_audio_active, false);
+            atomic_store(&s_video_active, false);
+            atomic_store(&s_incoming, false);
+            atomic_store(&s_in_call, false);
+            break;
+        default: break;
+    }
+    ESP_LOGI(TAG, "SIP event %d", event);
+    return ESP_OK;
+}
+
+int _send_audio(unsigned char *data, int len, void *ctx)
+{
+    
+    if (!data || len <= 0) return 0;
+    int64_t captured_at;
+    /* The RTC shared timer must never wait for a physical I2S microphone read. */
+    int n = sip_audio_capture_read(data, len, &captured_at);
+    if (n) sip_rtp_clock_set_audio_buffer(data, captured_at);
+    return n;
+    
+    
+
+}
+
+int _receive_audio(unsigned char *data, int len, void *ctx)
+{
+    if (!data || len <= 0) return 0;
+    if (len == 6 && !strncasecmp((char *)data, "DTMF-", 5)) return 0;
+    int consumed = 0;
+    /* Do not silently discard the tail of an RTP packet larger than 160 samples. */
+    while (consumed < len) {
+        int16_t stereo[PCM_FRAME_SAMPLES * 2];
+        int n = len - consumed;
+        if (n > PCM_FRAME_SAMPLES) n = PCM_FRAME_SAMPLES;
+        for (int i = 0; i < n; ++i) {
+            int16_t sample = esp_g711a_decode(data[consumed + i]);
+            stereo[i * 2] = stereo[i * 2 + 1] = sample;
+        }
+        if (audio_write_spk(stereo, n * 2 * sizeof(int16_t)) != ESP_CODEC_DEV_OK) return consumed;
+        consumed += n;
+    }
+    return consumed;
+}
+
+/* esp_rtc 0.6.1 passes an output length initially set to zero, not capacity.
+ * The SDK allocates vcodec_info.len bytes for this callback's destination. */
+static int sip_send_video(unsigned char *data, unsigned int *len, void *ctx)
+{
+    if (!len) return ESP_ERR_INVALID_ARG;
+    *len = 0;
+    if (!data) return ESP_ERR_INVALID_ARG;
+    atomic_fetch_add(&s_video_callbacks, 1);
+    if (!sip_service_video_active()) return ESP_OK;
+    /* With GOP 1 the hardware repeats frame_num/idr_pic_id. OpenH264's
+     * DecodeFrame2 (used by Linphone) otherwise keeps buffering with no output
+     * and no error. An AUD explicitly separates access units. Keep this in
+     * SIP's private destination so the working RTSP stream is unchanged.
+     * primary_pic_type=7 permits all slice types, followed by rbsp_stop_one_bit.
+     */
+    static const uint8_t aud[] = {0, 0, 0, 1, 9, 0xf0};
+    size_t written = 0;
+    esp_err_t ret = camera_copy_encoded_frame(data + sizeof(aud), JPEG_BUF_SIZE - sizeof(aud),
+                                               &written, &s_video_sequence);
+    if (ret == ESP_OK) {
+        memcpy(data, aud, sizeof(aud));
+        written += sizeof(aud);
+        sip_rtp_clock_set_buffer(true, data);
+        *len = (unsigned int)written;
+        atomic_fetch_add(&s_video_frames, 1);
+        atomic_fetch_add(&s_video_bytes, (unsigned)written);
+        if (!atomic_exchange(&s_video_headers_seen, true)) {
+            /* Inspect only the first supplied frame; never log picture bytes. */
+            unsigned mask = 0;
+            for (size_t i = 0; i + 3 < written; ++i) {
+                if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1) {
+                    mask |= 1u << (data[i + 3] & 31);
+                }
+            }
+            atomic_store(&s_video_nal_mask, mask);
+        }
+    } else if (ret == ESP_ERR_TIMEOUT) atomic_fetch_add(&s_video_busy, 1);
+    else if (ret == ESP_ERR_NOT_FOUND) atomic_fetch_add(&s_video_duplicate, 1);
+    else if (ret == ESP_ERR_INVALID_SIZE) atomic_fetch_add(&s_video_oversize, 1);
+    else atomic_fetch_add(&s_video_failed, 1);
+    /* A busy producer or no new frame means a dropped frame, never a partial NAL. */
+    return ret;
+}
+
+/* This feature sends the local camera with duplex audio. Remote video is not
+ * decoded/displayed; keep a safe sink for SDK receive callbacks. */
+static int sip_receive_video(unsigned char *data, int len, void *ctx)
+{
+    return data && len > 0 ? len : 0;
+}
+
+/* Called from the UI timer, not the SDK's time-sensitive media callback.
+ * These are frames supplied to the RTP library, not proof of network delivery. */
+void sip_service_video_diagnostics(void)
+{
+    sip_audio_capture_diagnostics();
+    if (sip_service_video_active()) sip_video_tx_diagnostics();
+    static int64_t last_report;
+    if (!sip_service_has_video() || !sip_service_in_call()) return;
+    int64_t now = esp_timer_get_time();
+    if (now - last_report < 1000000) return;
+    last_report = now;
+    unsigned mask = atomic_load(&s_video_nal_mask);
+    ESP_LOGI(TAG, "Video sample: active=%d callbacks=%u supplied=%u bytes=%u busy=%u no-new=%u oversize=%u failed=%u",
+             sip_service_video_active(), atomic_exchange(&s_video_callbacks, 0),
+             atomic_exchange(&s_video_frames, 0), atomic_exchange(&s_video_bytes, 0),
+             atomic_exchange(&s_video_busy, 0), atomic_exchange(&s_video_duplicate, 0),
+             atomic_exchange(&s_video_oversize, 0), atomic_exchange(&s_video_failed, 0));
+    ESP_LOGI(TAG, "First supplied frame: seen=%d SPS=%d PPS=%d IDR=%d",
+             atomic_load(&s_video_headers_seen), !!(mask & (1u << 7)),
+             !!(mask & (1u << 8)), !!(mask & (1u << 5)));
+}
+
+esp_rtc_handle_t sip_service_start(const char *uri)
+{
+    return sip_service_start_mode(uri, false);
+}
+
+esp_rtc_handle_t sip_service_start_mode(const char *uri, bool video)
+{
+    if (!uri || !g_codec_dev || !wifi_is_connected()) return NULL;
+    if (video && !camera_uses_h264()) return NULL;
+    if (video && sip_video_tx_init(JPEG_BUF_SIZE) != ESP_OK) return NULL;
+    if (sip_audio_capture_init() != ESP_OK) return NULL;
+    char *address = _get_network_ip();
+    if (!address) return NULL;
+    media_lib_add_default_adapter();
+    sip_rtp_clock_reset();
+    atomic_store(&s_registered, false);
+    atomic_store(&s_in_call, false);
+    atomic_store(&s_incoming, false);
+    atomic_store(&s_last_event, ESP_RTC_EVENT_UNREGISTERED);
+    atomic_store(&s_video_enabled, video);
+    atomic_store(&s_video_active, false);
+    atomic_store(&s_audio_active, false);
+    s_video_sequence = 0;
+    atomic_store(&s_video_callbacks, 0);
+    atomic_store(&s_video_frames, 0);
+    atomic_store(&s_video_bytes, 0);
+    atomic_store(&s_video_busy, 0);
+    atomic_store(&s_video_duplicate, 0);
+    atomic_store(&s_video_oversize, 0);
+    atomic_store(&s_video_failed, 0);
+    atomic_store(&s_video_headers_seen, false);
+    atomic_store(&s_video_nal_mask, 0);
+    static esp_rtc_video_info_t video_info = {
+        .vcodec = RTC_VCODEC_H264,
+        .width = CAMERA_H_RES,
+        .height = CAMERA_V_RES,
+        .fps = CONFIG_APP_VIDEO_CALL_FPS,
+        .len = JPEG_BUF_SIZE,
+    };
+    static esp_rtc_data_cb_t callbacks = {
+        .send_audio = _send_audio,
+        .receive_audio = _receive_audio,
+    };
+    callbacks.send_video = video ? sip_send_video : NULL;
+    callbacks.receive_video = video ? sip_receive_video : NULL;
+    esp_rtc_config_t config = {
+        .uri = uri,
+        .local_addr = address,
+        .acodec_type = RTC_ACODEC_G711A,
+        .vcodec_info = video ? &video_info : NULL,
+        /* Keep the protocol's frame-size default: older ADF headers do not
+           expose aud_frame_size. Callback buffers remain bounded to 160 samples. */
+        .data_cb = &callbacks,
+        .event_handler = _esp_sip_event_handler,
+        .p2p_mode = false,
+    };
+    esp_rtc_handle_t handle = esp_rtc_service_init(&config);
+    if (!handle) atomic_store(&s_video_enabled, false);
+    return handle;
+}
+
+int sip_service_stop(esp_rtc_handle_t handle)
+{
+    if (!handle) return ESP_ERR_INVALID_ARG;
+    int ret = esp_rtc_service_deinit(handle);
+    if (ret == ESP_OK) {
+        sip_audio_capture_stop();
+        sip_rtp_clock_reset();
+        atomic_store(&s_video_enabled, false);
+        atomic_store(&s_video_active, false);
+        atomic_store(&s_audio_active, false);
+        atomic_store(&s_registered, false);
+        atomic_store(&s_in_call, false);
+        atomic_store(&s_incoming, false);
+        atomic_store(&s_last_event, ESP_RTC_EVENT_UNREGISTERED);
+    }
+    return ret;
+}

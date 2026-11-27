@@ -1,0 +1,38 @@
+menu "Camera encoding"
+
+config APP_USE_H264
+    bool "Use the hardware H.264 encoder instead of MJPEG"
+    default y
+    help
+        Select the codec before camera initialization. Changing the codec at
+        runtime requires stopping SIP/RTSP and reinitializing the camera.
+        SIP video calls use H.264; keep this enabled for the Video calls card.
+
+config APP_JPEG_QUALITY
+    int "MJPEG image quality"
+    range 1 100
+    default 60
+    help
+        Higher values preserve more detail but increase WiFi bandwidth.
+        Start at 60 for VGA streaming; reduce it if frames arrive too slowly.
+
+config APP_H264_BITRATE
+    int "H.264 target bitrate (bits/s)"
+    range 250000 8000000
+    default 3000000
+    help
+        Target bitrate for VGA H.264. Intra-only frames tolerate the latest-frame
+        publisher dropping frames without breaking decoder reference frames.
+
+endmenu
+
+
+menu "SIP video calls"
+config APP_VIDEO_CALL_FPS
+    int "Camera transmit frame rate"
+    range 1 30
+    default 15
+    help
+        SIP sends the most recent complete camera frame at this rate. The
+        hardware encoder runs at 30 fps with independent frames (GOP 1).
+endmenu
