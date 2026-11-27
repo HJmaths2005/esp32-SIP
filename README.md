@@ -1,4 +1,4 @@
-# ESP32P4 RTSP / SIP — review fixes
+# ESP32P4 RTSP / SIP
 
 For the current Linphone 5.2.6 H.264 repair, SIP video investigation and firmware
 validation, see [LINPHONE_H264_DIAGNOSTICS.md](LINPHONE_H264_DIAGNOSTICS.md).
@@ -6,8 +6,6 @@ For the technical case study and prerequisite-based study labs, see
 [PROJECT_TECHNICAL_GUIDE.md](PROJECT_TECHNICAL_GUIDE.md) and
 [LEARNING_PATH.md](LEARNING_PATH.md).
 
-This source snapshot applies review fixes to upstream commit
-`e2a467a785d67f5320fec7b1fb97c4c389432bb1`.
 Subsequent SIP audio/video changes were built and tested on the board; the
 accepted image and configuration are in `backups/sip-av-verified/`. The current
 source includes the user's later microphone-transmit disable for speaker tests.
