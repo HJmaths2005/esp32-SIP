@@ -22,7 +22,6 @@ The project provides:
 ## Table of Contents
 
 - [Overview](#overview)
-- [Features](#features)
 - [Hardware](#hardware)
 - [Software Stack](#software-stack)
 - [Architecture](#architecture)
@@ -64,25 +63,6 @@ The application is built with **ESP-ADF v2.x** on top of **ESP-IDF v5.5**. SIP c
 
 ---
 
-## Features
-
-| Category | Feature |
-|----------|---------|
-| Voice calls | SIP full-duplex voice calls |
-| Video calls | SIP video calls with MJPEG or H.264 |
-| Signalling | SIP REGISTER, INVITE, ACK, BYE, CANCEL |
-| Media negotiation | SDP offer/answer |
-| Media transport | RTP/RTCP over UDP |
-| RTSP streaming | MJPEG over RTP |
-| RTSP methods | OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN |
-| Audio pipeline | ESP-ADF audio pipeline |
-| Video pipeline | Camera capture, MJPEG/H.264 encoding, RTP packetization |
-| Networking | Wi-Fi via ESP32-C6 and ESP-Hosted |
-| Display | On-board LCD video preview and call UI |
-| UI controls | Dial, answer, reject, hang up, codec selection |
-| Debugging | ESP-IDF monitor logging |
-
----
 
 ## Hardware
 
