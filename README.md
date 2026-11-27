@@ -28,6 +28,7 @@ The project provides:
 - [Protocol Support](#protocol-support)
 - [Requirements](#requirements)
 - [Setup](#setup)
+- [limitations](#limitations)
 
 ---
 
@@ -221,7 +222,6 @@ Tested clients:
 
 - VLC
 - ffplay
-- GStreamer
 
 ---
 
@@ -303,58 +303,11 @@ this module uses jd9365 lcd controller that many vendors manufacture it under th
 
 Configure:
 
-- Wi-Fi SSID and password
-- SIP server URI
-- SIP username and password
-- SIP video codec: MJPEG or H.264
-- RTSP port and stream path
-- Camera resolution and frame rate
-- Display and board options
+only configuration you might need is the SIP video call video encoding that you can do it in the menuconfig.
 
 ---
 
-## Configuration
-
-Configuration is available through `idf.py menuconfig` and can also be overridden in `main/app_config.h`.
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `CONFIG_WIFI_SSID` | — | Wi-Fi SSID |
-| `CONFIG_WIFI_PASSWORD` | — | Wi-Fi password |
-| `CONFIG_SIP_SERVER_URI` | `sip:192.168.1.10` | SIP registrar or proxy URI |
-| `CONFIG_SIP_USERNAME` | `esp32p4` | SIP username |
-| `CONFIG_SIP_PASSWORD` | `secret` | SIP password |
-| `CONFIG_SIP_VIDEO_CODEC` | `MJPEG` | SIP video codec: `MJPEG` or `H264` |
-| `CONFIG_RTSP_PORT` | `8554` | RTSP server port |
-| `CONFIG_RTSP_STREAM_PATH` | `/stream` | RTSP stream path |
-| `CONFIG_CAMERA_FPS` | `15` | Camera frame rate |
-| `CONFIG_CAMERA_RESOLUTION` | `VGA` | Camera resolution |
-
-Example `main/app_config.h`:
-
-```c
-#pragma once
-
-#define APP_WIFI_SSID              "your-ssid"
-#define APP_WIFI_PASSWORD          "your-password"
-
-#define APP_SIP_SERVER_URI         "sip:192.168.1.10"
-#define APP_SIP_USERNAME           "esp32p4"
-#define APP_SIP_PASSWORD           "secret"
-
-#define APP_SIP_VIDEO_CODEC_MJPEG  1
-#define APP_SIP_VIDEO_CODEC_H264   2
-#define APP_SIP_VIDEO_CODEC        APP_SIP_VIDEO_CODEC_MJPEG
-
-#define APP_RTSP_PORT              8554
-#define APP_RTSP_STREAM_PATH       "/stream"
-
-#define APP_CAMERA_FPS             15
-#define APP_CAMERA_RESOLUTION      "VGA"
-```
-
----
-
+## limitations
 
 - RTSP streaming supports **MJPEG only**.
 - SIP video calls support **MJPEG** and **H.264**.
@@ -362,3 +315,6 @@ Example `main/app_config.h`:
 - ESP32-C6 radio firmware must match the ESP-Hosted version used by the ESP32-P4 application.
 - Network performance depends on Wi-Fi signal quality, camera resolution, FPS, and selected codec.
 - For stable RTSP playback over lossy networks, prefer TCP interleaved transport.
+
+
+---
