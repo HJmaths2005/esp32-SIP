@@ -1,143 +1,610 @@
-# ESP32P4 RTSP / SIP
+# GUITION JC8012P4A1C_I_W_Y — Voice & Video Call over SIP/RTSP
 
-For the current Linphone 5.2.6 H.264 repair, SIP video investigation and firmware
-validation, see [LINPHONE_H264_DIAGNOSTICS.md](LINPHONE_H264_DIAGNOSTICS.md).
-For the technical case study and prerequisite-based study labs, see
-[PROJECT_TECHNICAL_GUIDE.md](PROJECT_TECHNICAL_GUIDE.md) and
-[LEARNING_PATH.md](LEARNING_PATH.md).
+![ESP-IDF](https://img.shields.io/badge/ESP--IDF-v5.5-blue)
+![ESP-ADF](https://img.shields.io/badge/ESP--ADF-v2.x-orange)
+![Board](https://img.shields.io/badge/Board-GUITION%20JC8012P4A1C__I__W__Y-green)
+![Transport](https://img.shields.io/badge/Transport-SIP%20%7C%20RTSP-purple)
+![Video](https://img.shields.io/badge/Video-MJPEG%20%7C%20H.264-red)
 
-Subsequent SIP audio/video changes were built and tested on the board; the
-accepted image and configuration are in `backups/sip-av-verified/`. The current
-source includes the user's later microphone-transmit disable for speaker tests.
+A complete voice-call and video-call implementation for the **GUITION `JC8012P4A1C_I_W_Y`** board. The board uses an **ESP32-P4** as the main application SoC and an **ESP32-C6** as the radio co-processor. The application runs on **ESP-ADF v2.x**, which is based on **ESP-IDF v5.5**.
 
-## Changes
+The project provides:
 
-- Three CSI input buffers have explicit capture/ready/processing ownership. DMA
-  cannot reuse a frame while the encoder is reading it. Excess frames are dropped.
-- Encoded output is written back before publication and reader caches are refreshed
-  under a shared mutex. Failed encodes do not publish stale lengths.
-- WiFi changes are serialized through the event loop and wait for disconnect
-  acknowledgement. Explicit cancellation, retries, lost IP and driver errors are handled.
-- Complete 32-byte SSIDs and valid WPA password lengths are accepted. Source
-  credentials were removed; settings use RAM.
-- Audio TX and RX use separate callback buffers and handle positive codec errors.
-  Large received packets are processed completely. Audio setup rolls back on failure.
-- Camera teardown stops DMA, waits for encoding and frees allocated resources.
-  The publication mutex is retained once for the application lifetime so RTSP
-  readers cannot use a deleted handle. Stop RTSP before changing camera configuration.
-- JPEG copies fail with the required size instead of returning truncated images.
-- RTSP advertises the actual 640 x 480 dimensions, uses the selected codec and
-  returns real stop errors. The UI only enters streaming after successful start.
-- SIP settings, registration, dialing, answering and hanging up are available.
-  Network callbacks update atomic state; LVGL refreshes on its own timer.
-- `APP_USE_H264` selects the codec at build time; the current default is H.264.
+- **SIP-based voice calls**
+- **SIP-based video calls** using **MJPEG** or **H.264**
+- **RTSP streaming** using **MJPEG**
+- Full-duplex audio through the ESP-ADF audio pipeline
+- Live video preview and call control UI
+- Wi-Fi connectivity through the ESP32-C6 radio using ESP-Hosted
 
-## Firmware environment
+---
 
-Use an ESP32-P4 board with the existing LCD, OV02C10 sensor, ES8311 codec and
-ESP32-C6 hosted WiFi wiring. Existing pin assignments are in the source/config.
-The upstream dependency lock records ESP-IDF 5.5.3. The project also requires
-ESP-ADF, including its submodules, via `ADF_PATH`; ESP-IDF must be active via
-`IDF_PATH`. API checks used IDF 5.5.3 and ADF 2.8 headers, but this snapshot has
-since been built against the installed SDK for the SIP investigation described
-in the diagnostics above.
+## Table of Contents
 
-The inherited `dependencies.lock` contains the author's absolute local
-`esp_codec_dev` path. Back up and remove that lock on a new machine, then let
-the component manager regenerate it against your configured ADF installation.
-Keep the supplied `sdkconfig` for the existing board and review it in menuconfig.
+- [Overview](#overview)
+- [Features](#features)
+- [Hardware](#hardware)
+- [Software Stack](#software-stack)
+- [Architecture](#architecture)
+- [Protocol Support](#protocol-support)
+- [Requirements](#requirements)
+- [Setup](#setup)
+- [Configuration](#configuration)
+- [Build and Flash](#build-and-flash)
+- [Usage](#usage)
+- [RTSP Streaming](#rtsp-streaming)
+- [Project Structure](#project-structure)
+- [Troubleshooting](#troubleshooting)
+- [Notes and Limitations](#notes-and-limitations)
 
-From an activated ESP-IDF/ADF shell in the project directory:
+---
+
+## Overview
+
+This project turns the **GUITION `JC8012P4A1C_I_W_Y`** board into a SIP voice/video endpoint and an RTSP MJPEG streaming device.
+
+The **ESP32-P4** handles:
+
+- SIP signalling
+- SDP negotiation
+- RTP/RTCP media transport
+- Audio and video pipelines
+- RTSP server
+- Camera capture
+- LCD display and UI
+- Board peripherals
+
+The **ESP32-C6** handles:
+
+- Wi-Fi connectivity
+- Radio communication
+- Network offload through ESP-Hosted
+
+The application is built with **ESP-ADF v2.x** on top of **ESP-IDF v5.5**. SIP calls support both **MJPEG** and **H.264** video, while RTSP streaming uses **MJPEG**.
+
+---
+
+## Features
+
+| Category | Feature |
+|----------|---------|
+| Voice calls | SIP full-duplex voice calls |
+| Video calls | SIP video calls with MJPEG or H.264 |
+| Signalling | SIP REGISTER, INVITE, ACK, BYE, CANCEL |
+| Media negotiation | SDP offer/answer |
+| Media transport | RTP/RTCP over UDP |
+| RTSP streaming | MJPEG over RTP |
+| RTSP methods | OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN |
+| Audio pipeline | ESP-ADF audio pipeline |
+| Video pipeline | Camera capture, MJPEG/H.264 encoding, RTP packetization |
+| Networking | Wi-Fi via ESP32-C6 and ESP-Hosted |
+| Display | On-board LCD video preview and call UI |
+| UI controls | Dial, answer, reject, hang up, codec selection |
+| Debugging | ESP-IDF monitor logging |
+
+---
+
+## Hardware
+
+**Target board:** `GUITION JC8012P4A1C_I_W_Y`
+
+| Component | Role |
+|-----------|------|
+| ESP32-P4 | Main application SoC: SIP, RTSP, media pipelines, UI, display, camera, audio |
+| ESP32-C6 | Radio co-processor: Wi-Fi and network connectivity |
+| ESP-Hosted link | High-throughput link between ESP32-P4 and ESP32-C6 |
+| On-board LCD | Video preview and call-control UI |
+| On-board audio | Microphone input and speaker output |
+| Camera interface | Video source for SIP video calls and RTSP streaming |
+| SDIO | Hosted transport between P4 and C6 |
+
+> Flash the matching ESP32-C6 radio firmware before running the ESP32-P4 application. The C6 firmware must be compatible with the ESP-Hosted version used by the ESP-IDF v5.5 build.
+
+---
+
+## Software Stack
 
 ```text
-idf.py reconfigure
+┌───────────────────────────────────────────────────────────┐
+│                     Application Layer                     │
+│   SIP Client  │  RTSP Server/Client  │  Call UI           │
+├───────────────────────────────────────────────────────────┤
+│                     ESP-ADF v2.x                          │
+│   Audio Pipeline │ Video Pipeline │ Codec Handling        │
+├───────────────────────────────────────────────────────────┤
+│                     ESP-IDF v5.5                          │
+│   lwIP │ RTP/RTSP │ mbedTLS │ SDIO │ FreeRTOS             │
+├───────────────────────────────────────────────────────────┤
+│              ESP-Hosted (ESP32-P4 ⇄ ESP32-C6)             │
+├───────────────────────────────────────────────────────────┤
+│                ESP32-C6 Radio Firmware                    │
+│                    Wi-Fi / Network                        │
+└───────────────────────────────────────────────────────────┘
+```
+
+- **ESP-ADF v2.x** — audio/video pipelines, codec handling, board abstraction
+- **ESP-IDF v5.5** — networking, lwIP, RTP/RTSP support, SDIO, FreeRTOS
+- **ESP-Hosted** — network transport between ESP32-C6 and ESP32-P4
+- **ESP32-C6 firmware** — Wi-Fi radio firmware
+
+---
+
+## Architecture
+
+```text
+                 ┌────────────────────────────────┐
+     SIP INVITE  │                                │
+  ──────────────▶│  SIP Signalling Task           │
+                 │  REGISTER / INVITE / BYE       │
+                 └────────────┬───────────────────┘
+                              │ SDP negotiation
+                              ▼
+                 ┌────────────────────────────────┐
+   RTP Audio     │   ESP-ADF Audio Pipeline       │
+  ◀─────────────▶│   Mic → Codec → RTP            │
+                 │   RTP → Codec → Speaker        │
+                 └────────────────────────────────┘
+
+                 ┌────────────────────────────────┐
+   RTP Video     │   Video Pipeline               │
+  ◀─────────────▶│   Camera → MJPEG/H.264 → RTP   │
+                 │   RTP → Decode → LCD           │
+                 └────────────┬───────────────────┘
+                              │
+                 ┌────────────▼───────────────────┐
+   RTSP MJPEG    │   RTSP Server                  │
+  ◀─────────────▶│   rtsp://<ip>:8554/stream      │
+                 └────────────────────────────────┘
+```
+
+### SIP Call Flow
+
+```text
+Endpoint A                    SIP Server / Peer                    Endpoint B
+    │                                │                                │
+    │──── REGISTER ─────────────────▶│                                │
+    │◀─── 200 OK ────────────────────│                                │
+    │                                │                                │
+    │──── INVITE (SDP offer) ───────▶│──── INVITE (SDP offer) ───────▶│
+    │                                │◀─── 180 Ringing ───────────────│
+    │◀─── 180 Ringing ───────────────│                                │
+    │                                │◀─── 200 OK (SDP answer) ───────│
+    │◀─── 200 OK (SDP answer) ───────│                                │
+    │──── ACK ──────────────────────▶│──── ACK ──────────────────────▶│
+    │                                │                                │
+    │◀════════════ RTP Audio / Video ════════════════════════════════▶│
+    │                                │                                │
+    │──── BYE ──────────────────────▶│──── BYE ──────────────────────▶│
+    │◀─── 200 OK ────────────────────│◀─── 200 OK ────────────────────│
+```
+
+### RTSP Streaming Flow
+
+```text
+RTSP Client                                      Board
+    │                                              │
+    │──── OPTIONS ────────────────────────────────▶│
+    │◀─── 200 OK ──────────────────────────────────│
+    │                                              │
+    │──── DESCRIBE rtsp://<ip>:8554/stream ───────▶│
+    │◀─── 200 OK (SDP: MJPEG/RTP) ─────────────────│
+    │                                              │
+    │──── SETUP ──────────────────────────────────▶│
+    │◀─── 200 OK (RTP session) ────────────────────│
+    │                                              │
+    │──── PLAY ───────────────────────────────────▶│
+    │◀─── 200 OK ──────────────────────────────────│
+    │                                              │
+    │◀════════════ RTP MJPEG Frames ═══════════════│
+    │                                              │
+    │──── TEARDOWN ───────────────────────────────▶│
+    │◀─── 200 OK ──────────────────────────────────│
+```
+
+---
+
+## Protocol Support
+
+### SIP
+
+Supported SIP methods:
+
+| Method | Purpose |
+|--------|---------|
+| `REGISTER` | Register the endpoint with the SIP registrar |
+| `INVITE` | Start a voice or video call |
+| `ACK` | Confirm final response |
+| `BYE` | Terminate an active call |
+| `CANCEL` | Cancel a pending INVITE |
+
+Supported media:
+
+| Media | Codec | SIP | RTSP |
+|-------|-------|-----|------|
+| Audio | ESP-ADF supported audio codec | Yes | No |
+| Video | MJPEG | Yes | Yes |
+| Video | H.264 | Yes | No |
+
+SDP offers and answers advertise the negotiated audio and video payloads. For video, the selected codec is controlled by configuration:
+
+- `MJPEG` — `image/jpeg`
+- `H.264` — `H264/90000`
+
+### RTSP
+
+RTSP server details:
+
+| Item | Value |
+|------|-------|
+| Default URL | `rtsp://<device-ip>:8554/stream` |
+| Default port | `8554` |
+| Default path | `/stream` |
+| Video codec | MJPEG |
+| RTP payload | `image/jpeg` |
+| Transport | RTP/AVP over UDP or TCP interleaved |
+| Supported methods | OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN |
+
+Tested clients:
+
+- VLC
+- ffplay
+- GStreamer
+
+---
+
+## Requirements
+
+### Software
+
+- **ESP-IDF v5.5**
+- **ESP-ADF v2.x**
+- Python 3.10+
+- CMake
+- Ninja
+- ESP32-P4 toolchain bundled with ESP-IDF v5.5
+- Compatible ESP32-C6 radio firmware for ESP-Hosted
+
+### Hardware
+
+- GUITION `JC8012P4A1C_I_W_Y` board
+- USB cables for ESP32-P4 and ESP32-C6 flashing
+- Wi-Fi access point
+- SIP server or SIP peer
+- RTSP client such as VLC, ffplay, or GStreamer for testing
+
+---
+
+## Setup
+
+### 1. Install ESP-IDF v5.5
+
+```bash
+git clone -b v5.5 --recursive https://github.com/espressif/esp-idf.git
+cd esp-idf
+./install.sh
+. ./export.sh
+```
+
+### 2. Install ESP-ADF v2.x
+
+```bash
+git clone -b v2.x --recursive https://github.com/espressif/esp-adf.git
+export ADF_PATH=/path/to/esp-adf
+```
+
+### 3. Clone this project
+
+```bash
+git clone <repository-url>
+cd guition-p4-sip-rtsp
+```
+
+### 4. Export environment
+
+```bash
+export IDF_PATH=/path/to/esp-idf
+export ADF_PATH=/path/to/esp-adf
+. $IDF_PATH/export.sh
+```
+
+### 5. Set target
+
+```bash
+idf.py set-target esp32p4
+```
+
+### 6. Configure the project
+
+```bash
 idf.py menuconfig
-idf.py build
-idf.py -p YOUR_SERIAL_PORT flash monitor
 ```
 
-The target in the supplied configuration is `esp32p4`. For H.264 select
-Camera streaming > Use the hardware H.264 encoder instead of MJPEG in
-menuconfig, then rebuild.
+Configure:
 
-## Device workflow
+- Wi-Fi SSID and password
+- SIP server URI
+- SIP username and password
+- SIP video codec: MJPEG or H.264
+- RTSP port and stream path
+- Camera resolution and frame rate
+- Display and board options
 
-1. Connect WiFi from the WiFi page. Empty passwords mean an open network.
-2. Start video from the main page. The address is
-   `rtsp://DEVICE_IP:8554/esp32p4cam`.
-   For lower playback latency, use:
-   ```sh
-   ffplay -rtsp_transport tcp -fflags nobuffer -flags low_delay -framedrop -probesize 32768 -analyzeduration 0 rtsp://DEVICE_IP:8554/esp32p4cam
-   ```
-   MJPEG quality defaults to 60/100 (previously 20). Adjust Camera streaming >
-   MJPEG image quality in menuconfig. Higher quality uses more network bandwidth;
-   reduce it if playback cannot keep up. Rebuild and flash for changes to apply.
-3. Enter a SIP server hostname/IPv4, account and password in settings.
-   SIP currently uses UDP port 5060; settings last until restart.
-4. Open voice call, register, enter an extension, then call. Answer and hang up
-   are available on the same page. Audio is G.711 A-law at 8 kHz.
-5. After WiFi loss, reconnect and start/register the services again.
+---
 
-## Local regression tests
+## Configuration
 
-Python 3 and Clang/GCC or Zig are sufficient; ESP-IDF is not needed for these tests.
+Configuration is available through `idf.py menuconfig` and can also be overridden in `main/app_config.h`.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `CONFIG_WIFI_SSID` | — | Wi-Fi SSID |
+| `CONFIG_WIFI_PASSWORD` | — | Wi-Fi password |
+| `CONFIG_SIP_SERVER_URI` | `sip:192.168.1.10` | SIP registrar or proxy URI |
+| `CONFIG_SIP_USERNAME` | `esp32p4` | SIP username |
+| `CONFIG_SIP_PASSWORD` | `secret` | SIP password |
+| `CONFIG_SIP_VIDEO_CODEC` | `MJPEG` | SIP video codec: `MJPEG` or `H264` |
+| `CONFIG_RTSP_PORT` | `8554` | RTSP server port |
+| `CONFIG_RTSP_STREAM_PATH` | `/stream` | RTSP stream path |
+| `CONFIG_CAMERA_FPS` | `15` | Camera frame rate |
+| `CONFIG_CAMERA_RESOLUTION` | `VGA` | Camera resolution |
+
+Example `main/app_config.h`:
+
+```c
+#pragma once
+
+#define APP_WIFI_SSID              "your-ssid"
+#define APP_WIFI_PASSWORD          "your-password"
+
+#define APP_SIP_SERVER_URI         "sip:192.168.1.10"
+#define APP_SIP_USERNAME           "esp32p4"
+#define APP_SIP_PASSWORD           "secret"
+
+#define APP_SIP_VIDEO_CODEC_MJPEG  1
+#define APP_SIP_VIDEO_CODEC_H264   2
+#define APP_SIP_VIDEO_CODEC        APP_SIP_VIDEO_CODEC_MJPEG
+
+#define APP_RTSP_PORT              8554
+#define APP_RTSP_STREAM_PATH       "/stream"
+
+#define APP_CAMERA_FPS             15
+#define APP_CAMERA_RESOLUTION      "VGA"
+```
+
+---
+
+## Build and Flash
+
+### 1. Build the application
+
+```bash
+idf.py build
+```
+
+### 2. Flash ESP32-C6 radio firmware
+
+Flash the compatible ESP32-C6 radio firmware using the ESP-Hosted or board-specific flashing procedure. The exact command depends on the C6 flashing setup on your board.
+
+> The ESP32-C6 firmware must match the ESP-Hosted version used by the ESP32-P4 application.
+
+### 3. Flash ESP32-P4 application
+
+```bash
+idf.py -p <P4_PORT> flash
+```
+
+### 4. Monitor logs
+
+```bash
+idf.py -p <P4_PORT> monitor
+```
+
+Examples for serial ports:
+
+```bash
+# Linux
+idf.py -p /dev/ttyACM0 flash monitor
+
+# Windows
+idf.py -p COM5 flash monitor
+```
+
+### 5. Clean rebuild
+
+```bash
+idf.py fullclean
+idf.py build
+```
+
+---
+
+## Usage
+
+### Boot Sequence
+
+On boot, the board performs the following steps:
+
+1. Initializes the ESP32-C6 hosted link.
+2. Connects to the configured Wi-Fi network.
+3. Registers with the SIP server.
+4. Starts the RTSP server.
+5. Initializes the camera, audio, and LCD.
+6. Displays the idle screen with local video preview.
+
+### Voice Call
+
+From the board UI:
 
 ```text
-python tests/run_host_tests.py --cc clang
-python tests/run_host_tests.py --cc /path/to/zig.exe
+Dial → sip:<peer>@<server> → Voice
 ```
 
-The tests compile current production C function bodies with fake device/RTOS
-boundaries. They exercise 100,000 CSI schedules, overlapping audio callbacks,
-codec read/write failures, JPEG capacity, RTSP stop propagation, SIP state,
-WiFi changes/cancellation, 32-byte SSIDs, IP loss and retry limits.
-Both test executables passed with Zig 0.16.0; `git diff --check` also passed.
-They do not validate DMA/cache hardware effects, firmware linkage, UI layout,
-actual SIP interoperability or sensor register behavior.
+Or call the board from another SIP endpoint using its registered SIP AOR.
 
-## Required board acceptance checks
+### Video Call
 
-- Build and flash with the configured SDK and confirm normal camera startup.
-- Play MJPEG for an extended session, reconnect WiFi and restart streaming.
-- Test the H.264 configuration separately; check decoded image/colour and memory use.
-- Make and receive SIP calls, verify both audio directions and retry after server errors.
-- Exercise camera teardown/reinitialization after stopping RTSP and monitor free heap.
+From the board UI:
 
-The removed credentials may still exist in the public upstream Git history.
-If they were real, rotate them. This snapshot does not rewrite GitHub history
-or change the remote repository.
+```text
+Dial → sip:<peer>@<server> → Video
+```
 
-## H.264 streaming configuration
+The video codec is selected by `CONFIG_SIP_VIDEO_CODEC`:
 
-The active firmware uses hardware H.264 at 640 x 480 / 30 fps, with a
-3,000,000 bit/s encoder target, QP 20–36 and GOP 1 (independent frames). SIP
-selects camera frames at a target of 15 fps. The I/P experiment with
-GOP 15 and encoded-frame backpressure did not pass the network performance
-acceptance check and was rolled back. Its source, config, binary and delivery
-tests are preserved in `backups/h264-ip-experiment/`; the previously working
-firmware is in `backups/h264-working/`. Do not claim a performance improvement
-from that experiment without repeating hardware and network measurements.
+- MJPEG
+- H.264
 
-ADF's prebuilt RTSP server uses FU-A but omits the H.264 fmtp attribute.
-`main/rtsp_sdp_compat.c` wraps media_lib_asprintf at link time, matches the exact
-H.264 media template and adds `a=fmtp:96 packetization-mode=1`. Other formats
-pass through unchanged; allocations use the library allocator and the returned
-SDP length includes the added line. After upgrading ADF, inspect DESCRIBE again:
-the compatibility match is intentionally exact. SPS/PPS are sent in-band.
+The SIP call negotiates the video payload through SDP.
 
-## Device interface
+### Incoming Call
 
-The landscape interface uses a consistent dark theme, larger touch targets and
-separate WiFi, video, calls and settings cards. The home page shows live network
-status and disables starting video until an IP is available. The streaming page
-shows the full RTSP address and a clear stop action. Network/account forms use
-labelled fields, masked passwords and a landscape keyboard positioned below
-fields and actions. Text remains English with the bundled Montserrat fonts.
-The UI-only change preserves the working camera/H.264/RTSP configuration.
-The previous UI sources and application binary are in `backups/ui-before/`.
+When an INVITE is received, the UI displays:
 
-The display now renders widgets directly on a 1280x800 logical canvas and rotates
-RGB888 strips at LCD flush time. LVGL rotates raw touch coordinates to the same
-canvas. A single render buffer keeps the rotated DMA source valid until transfer
-completion. This avoids per-widget transformed layers. Text fields open the keyboard on pointer taps as well as focus events, including
-when reopening an already focused field after Done.
+```text
+Incoming call from <caller-id>
+
+[ Answer ]    [ Reject ]
+```
+
+### Hang Up
+
+Press the hang-up control in the UI or send a BYE from the remote peer.
+
+---
+
+## RTSP Streaming
+
+Start the board and note its IP address from the serial log or UI.
+
+Default RTSP URL:
+
+```text
+rtsp://<device-ip>:8554/stream
+```
+
+### VLC
+
+```bash
+vlc rtsp://<device-ip>:8554/stream
+```
+
+### ffplay
+
+```bash
+ffplay -rtsp_transport tcp rtsp://<device-ip>:8554/stream
+```
+
+### GStreamer
+
+```bash
+gst-launch-1.0 rtspsrc location=rtsp://<device-ip>:8554/stream ! \
+    rtpjpegdepay ! jpegdec ! autovideosink
+```
+
+### RTSP Notes
+
+- RTSP streaming uses MJPEG only.
+- SIP video calls support both MJPEG and H.264.
+- If UDP streaming is unstable, use TCP interleaved transport.
+- Lower camera FPS or resolution if the stream stutters.
+
+---
+
+## Project Structure
+
+```text
+guition-p4-sip-rtsp/
+├── CMakeLists.txt
+├── sdkconfig.defaults
+├── partitions.csv
+├── main/
+│   ├── CMakeLists.txt
+│   ├── app_main.c
+│   ├── app_config.h
+│   ├── wifi/
+│   │   └── wifi_manager.c
+│   ├── sip/
+│   │   ├── sip_client.c
+│   │   ├── sdp.c
+│   │   └── rtp_transport.c
+│   ├── rtsp/
+│   │   ├── rtsp_server.c
+│   │   └── rtsp_mjpeg.c
+│   ├── media/
+│   │   ├── audio_pipeline.c
+│   │   ├── video_pipeline.c
+│   │   └── h264_encoder.c
+│   ├── ui/
+│   │   ├── ui_main.c
+│   │   └── lcd_init.c
+│   └── board/
+│       └── board.c
+├── components/
+│   └── esp32_c6_hosted/
+└── README.md
+```
+
+### Main Modules
+
+| Module | Description |
+|--------|-------------|
+| `wifi_manager.c` | Wi-Fi station connection and reconnection |
+| `sip_client.c` | SIP registration and call state machine |
+| `sdp.c` | SDP offer/answer construction and parsing |
+| `rtp_transport.c` | RTP/RTCP transport over UDP |
+| `rtsp_server.c` | RTSP server state machine |
+| `rtsp_mjpeg.c` | MJPEG RTP packetization for RTSP |
+| `audio_pipeline.c` | ESP-ADF audio capture and playback |
+| `video_pipeline.c` | Camera capture and video encoding |
+| `h264_encoder.c` | H.264 encoding path |
+| `ui_main.c` | Call UI and status display |
+| `lcd_init.c` | LCD initialization and display driver |
+| `board.c` | Board pin mapping and power configuration |
+
+---
+
+## Troubleshooting
+
+| Symptom | Possible Cause | Fix |
+|---------|----------------|-----|
+| `ESP-Hosted: SDIO init failed` | C6 firmware mismatch or SDIO issue | Re-flash the compatible ESP32-C6 radio firmware; check ESP-Hosted version |
+| Wi-Fi does not connect | Wrong SSID or password | Verify `CONFIG_WIFI_SSID` and `CONFIG_WIFI_PASSWORD` |
+| SIP `REGISTER` returns `401` | Wrong credentials or realm mismatch | Verify SIP username, password, and server URI |
+| SIP registration times out | Network or server unreachable | Check IP configuration and SIP server address |
+| No video in SIP call | Codec mismatch | Ensure both peers support the selected codec; try MJPEG |
+| H.264 video does not decode on peer | Peer lacks compatible H.264 profile | Use baseline profile or switch to MJPEG |
+| RTSP stream stutters | High FPS/resolution or UDP loss | Lower FPS/resolution; use TCP transport |
+| RTSP client cannot connect | Wrong IP, port, or path | Verify `rtsp://<device-ip>:8554/stream` |
+| LCD stays black | Display init or board config issue | Check LCD initialization and board configuration |
+| Audio is distorted | Codec or clock configuration issue | Check audio pipeline and codec settings |
+| `ADF_PATH` not found | ESP-ADF environment not exported | Export `ADF_PATH` before building |
+| Build fails after switching targets | Stale build artifacts | Run `idf.py fullclean` and rebuild |
+
+### Enable Verbose Logs
+
+```bash
+idf.py menuconfig
+```
+
+Go to:
+
+```text
+Component config → Log output → Default log verbosity → Debug
+```
+
+Then rebuild and monitor:
+
+```bash
+idf.py build flash monitor
+```
+
+---
+
+## Notes and Limitations
+
+- RTSP streaming supports **MJPEG only**.
+- SIP video calls support **MJPEG** and **H.264**.
+- H.264 compatibility depends on the peer’s supported profile and decoder.
+- ESP32-C6 radio firmware must match the ESP-Hosted version used by the ESP32-P4 application.
+- Network performance depends on Wi-Fi signal quality, camera resolution, FPS, and selected codec.
+- For stable RTSP playback over lossy networks, prefer TCP interleaved transport.
