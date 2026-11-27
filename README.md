@@ -276,7 +276,7 @@ export ADF_PATH=/path/to/esp-adf
 
 ```bash
 git clone <repository-url>
-cd guition-p4-sip-rtsp
+cd ./internship
 ```
 
 ### 4. Export environment
@@ -287,17 +287,9 @@ export ADF_PATH=/path/to/esp-adf
 . $IDF_PATH/export.sh
 ```
 
-### 5. Set target
+###5.building project:
 
-```bash
-idf.py set-target esp32p4
-```
-
-### 6. Configure the project
-
-```bash
-idf.py menuconfig
-```
+run idf.py build command. remember to avoid dependency hell do not run any command like menuconfig or set-target every thing you need is being included in the sdkconfig file.
 
 Configure:
 
